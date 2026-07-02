@@ -38,6 +38,7 @@ class ColumnProfile:
     max: float | None = None
     outlier_count: int = 0
     outlier_row_indices: list[int] = field(default_factory=list)
+    zero_count: int = 0  # number of literal 0 values (common domain-implausible placeholder)
 
 
 @dataclass
@@ -178,6 +179,7 @@ def _profile_column(series: pd.Series, name: str) -> ColumnProfile:
         outlier_idx = _detect_outliers(series)
         profile.outlier_count = len(outlier_idx)
         profile.outlier_row_indices = outlier_idx
+        profile.zero_count = int((series == 0).sum())
 
     return profile
 
