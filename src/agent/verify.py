@@ -211,7 +211,7 @@ def verify_proposal(
         b = df_before[target_col]
         a = df_after[target_col]
         changed_mask = b.isna() != a.isna()
-        changed_mask |= (b.notna() & a.notna() & (b != a))
+        changed_mask |= (b.notna() & a.notna() & b.ne(a))
         rows_affected = int(changed_mask.sum())
         sample_idx = changed_mask[changed_mask].index[:3]
         before_sample = [
@@ -237,7 +237,7 @@ def verify_proposal(
         if col == target_col:
             continue
         b, a = b_reset[col], a_reset[col]
-        changed = (b.isna() != a.isna()) | (b.notna() & a.notna() & (b != a))
+        changed = (b.isna() != a.isna()) | (b.notna() & a.notna() & b.ne(a))
         if changed.any():
             unexpected_cols.append(col)
 

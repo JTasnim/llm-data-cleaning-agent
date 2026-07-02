@@ -126,7 +126,18 @@ Rules:
 - Do not propose fixes for issues that do not exist in the profile.
 - Keep transform_code short and safe. Use df.fillna(), df.drop_duplicates(),
   df[col].replace(), df.loc[mask, col] = value patterns.
-- affected_count must be a realistic integer derived from the profile data.
+- For affected_count MUST use the exact number from the statistical profile —
+  not an estimate from the sample rows. Use null_count for missing_value
+  proposals, outlier_count for outlier proposals, duplicate_row_count for
+  duplicate proposals, and the count of domain-implausible values from the
+  profile min/max for domain_implausible proposals.
+- For domain_implausible proposals targeting zero values: use zero_count
+  from the profile for affected_count, not outlier_count. Zero counts are
+  listed separately because zeros are often domain-implausible placeholders
+  (e.g. BloodPressure=0, Insulin=0) that do not register as statistical outliers.
+- Do NOT estimate affected_count from the 5 sample rows. The profile
+  already contains the correct counts for the full dataset.
+- CRITICAL: Use CoW-safe pandas patterns. NEVER use df[col].fillna(x, inplace=True) or df[col].replace(x, y, inplace=True) as these silently do nothing in pandas 2.0+. Instead use: df[col] = df[col].fillna(x)  or  df[col] = df[col].replace(x, y)  or  df.loc[mask, col] = value
 """
 
 
@@ -144,6 +155,7 @@ def _build_prompt(
                 "dtype": col.dtype,
                 "null_count": col.null_count,
                 "null_rate": round(col.null_rate, 4),
+                "zero_count": col.zero_count,
                 "is_numeric": col.is_numeric,
                 "is_mixed_type": col.is_mixed_type,
                 "outlier_count": col.outlier_count,
