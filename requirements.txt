@@ -1,11 +1,11 @@
 # --- LLM backbone (free tier) ---
-google-generativeai>=0.8.0      # Gemini 2.5 Flash (primary)
-groq>=0.11.0                     # Llama 3.3 70B (fallback)
+google-genai>=1.0.0               # Gemini 2.5 Flash (primary) — replaces deprecated google-generativeai (EOL Nov 2025)
+groq>=0.11.0                       # Llama 3.3 70B (fallback)
 
 # --- Agent framework ---
 langchain>=0.3.0
 langgraph>=0.2.0
-langchain-google-genai>=2.0.0
+langchain-google-genai>=4.0.0      # uses consolidated google-genai SDK as of v4.0.0
 langchain-groq>=0.2.0
 
 # --- Data layer ---
@@ -20,7 +20,7 @@ chromadb>=0.5.0
 streamlit>=1.38.0
 
 # --- Evaluation ---
-scikit-learn>=1.5.0
+scikit-learn>=1.5.0              # confusion matrix utilities
 matplotlib>=3.9.0
 seaborn>=0.13.0
 
