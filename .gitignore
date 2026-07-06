@@ -32,3 +32,4 @@ add.py
 # Large generated benchmark artifacts (keep raw/ground_truth in git, ignore scratch outputs)
 benchmarks/corrupted/*.csv
 !benchmarks/corrupted/.gitkeep
+outputs/
