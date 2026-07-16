@@ -31,6 +31,7 @@ from google import genai
 
 from src.agent.domain_inference import DomainInferenceResult
 from src.profiler.profile import DatasetProfile
+import time
 
 load_dotenv()
 
@@ -137,7 +138,14 @@ Rules:
   (e.g. BloodPressure=0, Insulin=0) that do not register as statistical outliers.
 - Do NOT estimate affected_count from the 5 sample rows. The profile
   already contains the correct counts for the full dataset.
-- CRITICAL: Use CoW-safe pandas patterns. NEVER use df[col].fillna(x, inplace=True) or df[col].replace(x, y, inplace=True) as these silently do nothing in pandas 2.0+. Instead use: df[col] = df[col].fillna(x)  or  df[col] = df[col].replace(x, y)  or  df.loc[mask, col] = value
+- CRITICAL: Use CoW-safe pandas patterns only. NEVER use:
+  df[col].fillna(x, inplace=True)  — silently does nothing under pandas 2.0+
+  df[col].replace(x, y, inplace=True)  — same issue
+  df.loc[mask, col] = df[col].quantile(n)  — quantile() returns a numpy scalar which causes a setitem TypeError
+  Instead ALWAYS use:
+  df[col] = df[col].fillna(x)
+  df[col] = df[col].clip(upper=float(df[col].quantile(0.99)))
+  df.loc[mask, col] = float(value)  — cast to Python float before assigning
 """
 
 
@@ -248,6 +256,19 @@ def propose_transforms(
     prompt = _build_prompt(profile, domain_result, sample_rows)
 
     client = genai.Client(api_key=key)
-    response = client.models.generate_content(model=model, contents=prompt)
+
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(model=model, contents=prompt)
+            break
+        except Exception as e:
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                wait = 10 * (attempt + 1)
+                print(f"  Gemini unavailable, retrying in {wait}s (attempt {attempt + 1}/3)...")
+                time.sleep(wait)
+                if attempt == 2:
+                    raise
+            else:
+                raise
 
     return _parse_proposals(response.text)
