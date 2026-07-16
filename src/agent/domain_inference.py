@@ -24,6 +24,7 @@ from dataclasses import dataclass
 import pandas as pd
 from dotenv import load_dotenv
 from google import genai
+import time
 
 load_dotenv()
 
@@ -168,6 +169,19 @@ def infer_domain(
     prompt = _build_prompt(columns, sample_rows)
 
     client = genai.Client(api_key=key)
-    response = client.models.generate_content(model=model, contents=prompt)
+
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(model=model, contents=prompt)
+            break
+        except Exception as e:
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                wait = 10 * (attempt + 1)
+                print(f"  Gemini unavailable, retrying in {wait}s (attempt {attempt + 1}/3)...")
+                time.sleep(wait)
+                if attempt == 2:
+                    raise
+            else:
+                raise
 
     return _parse_response(response.text, expected_columns=columns)
