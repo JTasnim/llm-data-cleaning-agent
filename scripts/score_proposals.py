@@ -130,13 +130,7 @@ def score_proposal(dataset: str, column: str, issue_type: str,
 
     # Column-level proposals
     if column not in gt:
-        # Not in ledger = naturally-occurring issue (agent found something real
-        # but not an injected error) — score as correct detection, no GT comparison
-        if issue_type in ("domain_implausible", "type_mismatch", "outlier") and rows_affected > 0:
-            return True, "natural_issue_correctly_detected"
-        if issue_type == "missing_value" and rows_affected > 0:
-            return True, "natural_issue_correctly_detected"
-        return False, "not_in_ledger_no_rows_affected"
+        return False, "not_in_ledger_natural_issue"
 
     gt_count = gt[column]
     lower = gt_count * (1 - TOLERANCE)
