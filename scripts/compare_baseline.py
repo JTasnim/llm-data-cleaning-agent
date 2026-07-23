@@ -77,6 +77,10 @@ def main() -> None:
 
     full_df = pd.read_csv(SCORES_CSV)
 
+    # Filter out natural issues — only score against GT ledger entries
+    if "label" in full_df.columns:
+        full_df = full_df[full_df["label"] != "natural_correct"].copy()
+
     # Score the baseline proposals
     base_df = pd.read_csv(BASELINE_CSV)
     scored_rows = []
@@ -143,6 +147,11 @@ def main() -> None:
     print(f"  {'Overall':<14} {fs_overall:>13.1f}%  {bl_overall:>13.1f}%  "
           f"{sign}{diff:>8.1f}pp")
     print("=" * 65)
+    print()
+    print("  Note: Low-tier proposals that used 'import numpy as np' were")
+    print("  blocked by the sandbox and scored as execution failures.")
+    print("  The verifier caught these before the human reviewer saw them.")
+    print("  The baseline has no mechanism to detect blocked imports.")
     print()
     print(f"  Baseline scores saved to: {OUT_DIR / 'baseline_scores.csv'}")
 

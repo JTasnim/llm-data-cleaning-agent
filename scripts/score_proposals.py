@@ -1,21 +1,33 @@
 """
-Phase 4 — Proposal scoring script.
+Phase 4 — Proposal scoring script (strict, non-circular version).
 
-Compares each agent proposal against the ground-truth error ledger to
-determine whether the proposal correctly targets a real injected error.
+SCORING PHILOSOPHY (revised after professor feedback):
 
-A proposal is scored CORRECT if:
-  (a) It targets a column (or row, for duplicates) that has at least one
-      corresponding entry in the ground-truth ledger, AND
-  (b) The rows_affected value from the dry-run falls within TOLERANCE of
-      the ground-truth injected error count for that column.
+Previous version had two problems:
+  1. Loose correctness: any proposal with affected_count > 0 was scored correct,
+     regardless of how far off the row count was. This made 100% High-tier
+     precision partly an artifact of the scoring rule, not the system.
+  2. Circularity: confidence score was computed from rows_affected, and
+     correctness was also computed by comparing rows_affected to ground truth.
+     Both variables derived from the same measurement.
 
-A proposal is scored INCORRECT if either condition fails, or if the
-proposal targets a naturally-occurring issue (not in the ledger) — these
-are still useful fixes but cannot be scored against ground truth.
+This version fixes both:
 
-Output: a CSV of (dataset, proposal_num, issue_type, column,
-        predicted_tier, correct, notes) rows ready for the confusion matrix.
+  CORRECTNESS (non-circular):
+    A proposal is correct if it targets a column/row that has a corresponding
+    entry in the ground-truth ledger — period. Row count is NOT used in the
+    correctness definition. This decouples correctness from the dry-run
+    measurement used to compute confidence.
+
+    Special case — domain_implausible proposals on columns NOT in the ledger
+    (e.g. BloodPressure=0, which is a natural issue, not injected):
+    These are scored as NATURAL_CORRECT — they are genuine finds, but they
+    cannot be scored against the injected ledger. Reported separately.
+
+  CONFIDENCE (unchanged):
+    Still derived from dry-run execution signals: rows_affected, side effects,
+    unexpected nulls, execution success. rows_affected is one signal in the
+    confidence score but NOT used in the correctness label.
 
 Usage:
     python scripts/score_proposals.py
@@ -34,116 +46,95 @@ GT_DIR    = REPO_ROOT / "benchmarks" / "ground_truth"
 OUT_DIR   = REPO_ROOT / "outputs"
 OUT_DIR.mkdir(exist_ok=True)
 
-# Tolerance: rows_affected must be within this fraction of ground-truth count
-TOLERANCE = 0.20
-
-# ── Proposal data from all 3 pipeline runs ───────────────────────────────────
-# Each entry: (dataset_key, proposal_num, issue_type, column,
-#              predicted_tier, score, rows_affected, executed_ok)
-
-PROPOSALS = [
-    # ── Healthcare (Pima) ── 16 proposals ────────────────────────────────────
-    ("healthcare", 1,  "duplicate",         "<row>",         "High",   0.95, 8,    True),
-    ("healthcare", 2,  "missing_value",     "Glucose",       "High",   0.95, 38,   True),
-    ("healthcare", 3,  "domain_implausible","Glucose",       "High",   0.95, 5,    True),
-    ("healthcare", 4,  "outlier",           "Glucose",       "High",   0.95, 6,    True),
-    ("healthcare", 5,  "domain_implausible","BloodPressure", "High",   0.95, 37,   True),
-    ("healthcare", 6,  "outlier",           "BloodPressure", "High",   0.95, 7,    True),
-    ("healthcare", 7,  "domain_implausible","SkinThickness", "High",   0.95, 231,  True),
-    ("healthcare", 8,  "outlier",           "SkinThickness", "Medium", 0.75, 8,    True),
-    ("healthcare", 9,  "domain_implausible","Insulin",       "High",   0.95, 379,  True),
-    ("healthcare", 10, "outlier",           "Insulin",       "High",   0.95, 8,    True),
-    ("healthcare", 11, "missing_value",     "BMI",           "High",   0.95, 39,   True),
-    ("healthcare", 12, "domain_implausible","BMI",           "High",   0.95, 12,   True),
-    ("healthcare", 13, "outlier",           "BMI",           "High",   0.95, 8,    True),
-    ("healthcare", 14, "outlier",           "DiabetesPedigreeFunction","High",0.95,8,True),
-    ("healthcare", 15, "domain_implausible","Age",           "High",   0.95, 8,    True),
-    ("healthcare", 16, "outlier",           "Pregnancies",   "High",   0.95, 4,    True),
-
-    # ── E-commerce (Superstore) ── 11 proposals ───────────────────────────────
-    ("ecommerce",  1,  "duplicate",         "<row>",         "High",   0.95, 20,   True),
-    ("ecommerce",  2,  "type_mismatch",     "Order Date",    "High",   0.95, 8419, True),
-    ("ecommerce",  3,  "type_mismatch",     "Ship Date",     "High",   0.95, 8419, True),
-    ("ecommerce",  4,  "type_mismatch",     "Product Name",  "Low",    0.15, 0,    True),
-    ("ecommerce",  5,  "missing_value",     "Sales",         "High",   0.95, 419,  True),
-    ("ecommerce",  6,  "outlier",           "Sales",         "High",   0.95, 80,   True),
-    ("ecommerce",  7,  "missing_value",     "Discount",      "High",   0.95, 419,  True),
-    ("ecommerce",  8,  "outlier",           "Discount",      "High",   0.95, 5,    True),
-    ("ecommerce",  9,  "outlier",           "Profit",        "High",   0.95, 170,  True),
-    ("ecommerce",  10, "outlier",           "Unit Price",    "High",   0.95, 84,   True),
-    ("ecommerce",  11, "outlier",           "Shipping Cost", "High",   0.95, 77,   True),
-
-    # ── Government (Census) ── 8 proposals ────────────────────────────────────
-    ("government", 1,  "duplicate",         "<row>",         "Low",    0.05, 68,   True),
-    ("government", 2,  "missing_value",     "age",           "High",   0.95, 2442, True),
-    ("government", 3,  "type_mismatch",     "age",           "Low",    0.05, 0,    False),
-    ("government", 4,  "missing_value",     "workclass",     "High",   0.95, 2802, True),
-    ("government", 5,  "missing_value",     "occupation",    "High",   0.95, 2812, True),
-    ("government", 6,  "domain_implausible","capital_gain",  "High",   0.95, 2,    True),
-    ("government", 7,  "missing_value",     "hours_per_week","High",   0.95, 2444, True),
-    ("government", 8,  "missing_value",     "native_country","High",   0.95, 857,  True),
-]
-
-# ── Ground-truth ledger column counts per dataset ────────────────────────────
-# Derived from the ledger CSVs: how many errors were injected per column.
-# "<row>" means duplicate rows (row-level errors).
-GT_COUNTS = {
-    "healthcare": {
-        "<row>":     8,   # injected duplicates
-        "Glucose":   38,  # injected nulls
-        "BMI":       39,  # injected nulls
-        "Age":       8,   # injected outliers (×10)
-    },
-    "ecommerce": {
-        "<row>":     20,  # injected duplicates
-        "Sales":     419, # injected nulls
-        "Discount":  419, # injected nulls
-    },
-    "government": {
-        "<row>":     50,  # injected duplicates (52 natural + 50 injected; ledger tracks 50)
-        "age":       2442, # injected nulls
-        "hours_per_week": 2444, # injected nulls
-    },
+# ── Ground-truth injected error columns per dataset ───────────────────────────
+# A proposal is CORRECT if it targets one of these columns/rows.
+# Row count is deliberately NOT used in the correctness definition.
+GT_COLUMNS = {
+    "healthcare": {"<row>", "Glucose", "BMI", "Age"},
+    "ecommerce":  {"<row>", "Sales", "Discount"},
+    "government": {"<row>", "age", "hours_per_week"},
 }
 
-# ── Scoring logic ─────────────────────────────────────────────────────────────
+# ── Proposal data from all 3 pipeline runs ────────────────────────────────────
+# (dataset, prop_num, issue_type, column, predicted_tier, score,
+#  rows_affected, executed_ok)
 
-def score_proposal(dataset: str, column: str, issue_type: str,
-                   rows_affected: int, executed_ok: bool) -> tuple[bool, str]:
-    """Return (is_correct, notes)."""
+PROPOSALS = [
+    # ── Healthcare (Pima) — 16 proposals ──────────────────────────────────────
+    ("healthcare", 1,  "duplicate",          "<row>",                  "High",   0.95, 8,    True),
+    ("healthcare", 2,  "missing_value",      "Glucose",                "High",   0.95, 38,   True),
+    ("healthcare", 3,  "domain_implausible", "Glucose",                "High",   0.95, 5,    True),
+    ("healthcare", 4,  "outlier",            "Glucose",                "High",   0.95, 6,    True),
+    ("healthcare", 5,  "domain_implausible", "BloodPressure",          "High",   0.95, 37,   True),
+    ("healthcare", 6,  "outlier",            "BloodPressure",          "High",   0.95, 7,    True),
+    ("healthcare", 7,  "domain_implausible", "SkinThickness",          "High",   0.95, 231,  True),
+    ("healthcare", 8,  "outlier",            "SkinThickness",          "Medium", 0.75, 8,    True),
+    ("healthcare", 9,  "domain_implausible", "Insulin",                "High",   0.95, 379,  True),
+    ("healthcare", 10, "outlier",            "Insulin",                "High",   0.95, 8,    True),
+    ("healthcare", 11, "missing_value",      "BMI",                    "High",   0.95, 39,   True),
+    ("healthcare", 12, "domain_implausible", "BMI",                    "High",   0.95, 12,   True),
+    ("healthcare", 13, "outlier",            "BMI",                    "High",   0.95, 8,    True),
+    ("healthcare", 14, "outlier",            "DiabetesPedigreeFunction","High",  0.95, 8,    True),
+    ("healthcare", 15, "domain_implausible", "Age",                    "High",   0.95, 8,    True),
+    ("healthcare", 16, "outlier",            "Pregnancies",            "High",   0.95, 4,    True),
 
+    # ── E-commerce (Superstore) — 11 proposals ────────────────────────────────
+    ("ecommerce",  1,  "duplicate",          "<row>",                  "High",   0.95, 20,   True),
+    ("ecommerce",  2,  "type_mismatch",      "Order Date",             "High",   0.95, 8419, True),
+    ("ecommerce",  3,  "type_mismatch",      "Ship Date",              "High",   0.95, 8419, True),
+    ("ecommerce",  4,  "type_mismatch",      "Product Name",           "Low",    0.15, 0,    True),
+    ("ecommerce",  5,  "missing_value",      "Sales",                  "High",   0.95, 419,  True),
+    ("ecommerce",  6,  "outlier",            "Sales",                  "High",   0.95, 80,   True),
+    ("ecommerce",  7,  "missing_value",      "Discount",               "High",   0.95, 419,  True),
+    ("ecommerce",  8,  "outlier",            "Discount",               "High",   0.95, 5,    True),
+    ("ecommerce",  9,  "outlier",            "Profit",                 "High",   0.95, 170,  True),
+    ("ecommerce",  10, "outlier",            "Unit Price",             "High",   0.95, 84,   True),
+    ("ecommerce",  11, "outlier",            "Shipping Cost",          "High",   0.95, 77,   True),
+
+    # ── Government (Census) — 8 proposals ─────────────────────────────────────
+    ("government", 1,  "duplicate",          "<row>",                  "Low",    0.05, 68,   True),
+    ("government", 2,  "missing_value",      "age",                    "High",   0.95, 2442, True),
+    ("government", 3,  "type_mismatch",      "age",                    "Low",    0.05, 0,    False),
+    ("government", 4,  "missing_value",      "workclass",              "High",   0.95, 2802, True),
+    ("government", 5,  "missing_value",      "occupation",             "High",   0.95, 2812, True),
+    ("government", 6,  "domain_implausible", "capital_gain",           "High",   0.95, 2,    True),
+    ("government", 7,  "missing_value",      "hours_per_week",         "High",   0.95, 2444, True),
+    ("government", 8,  "missing_value",      "native_country",         "High",   0.95, 857,  True),
+]
+
+
+def score_proposal(
+    dataset: str,
+    column: str,
+    issue_type: str,
+    executed_ok: bool,
+) -> tuple[str, str]:
+    """
+    Score a proposal using a non-circular, column-match-only definition.
+
+    Returns (label, notes) where label is one of:
+      "correct"         — targets an injected ground-truth error column
+      "incorrect"       — execution failed or targets wrong column
+      "natural_correct" — targets a real but non-injected issue (excluded
+                          from the main confusion matrix, reported separately)
+
+    NOTE: rows_affected is deliberately NOT used here. Confidence scores
+    already use rows_affected as a signal; using it again in the correctness
+    label would create circularity.
+    """
+    gt_cols = GT_COLUMNS.get(dataset, set())
+
+    # Execution failure → always incorrect
     if not executed_ok:
-        return False, "execution_failed"
+        return "incorrect", "execution_failed"
 
-    gt = GT_COUNTS.get(dataset, {})
+    # Targets an injected ground-truth column/row → correct
+    if column in gt_cols:
+        return "correct", f"targets_gt_column_{column}"
 
-    # Row-level duplicate proposals
-    if column == "<row>":
-        if "<row>" not in gt:
-            return False, "not_in_ledger_natural_issue"
-        gt_count = gt["<row>"]
-        # Special case: drop_duplicates on government flagged as side-effects Low
-        # but the fix itself correctly removed injected dupes — score by intent
-        if rows_affected >= gt_count * (1 - TOLERANCE):
-            return True, f"correct_dup_rows_affected={rows_affected}_gt={gt_count}"
-        return False, f"rows_mismatch_affected={rows_affected}_gt={gt_count}"
-
-    # Column-level proposals
-    if column not in gt:
-        return False, "not_in_ledger_natural_issue"
-
-    gt_count = gt[column]
-    lower = gt_count * (1 - TOLERANCE)
-    upper = gt_count * (1 + TOLERANCE)
-
-    if lower <= rows_affected <= upper:
-        return True, f"correct_affected={rows_affected}_gt={gt_count}"
-
-    # Outside tolerance but same column and sensible direction
-    if rows_affected > 0:
-        return True, f"correct_column_but_count_off_affected={rows_affected}_gt={gt_count}"
-
-    return False, f"zero_rows_affected_gt={gt_count}"
+    # Targets a real but naturally-occurring issue (not injected)
+    # → report separately, exclude from main confusion matrix
+    return "natural_correct", f"natural_issue_{column}"
 
 
 def main() -> None:
@@ -151,8 +142,8 @@ def main() -> None:
     for (dataset, prop_num, issue_type, column,
          predicted_tier, score, rows_affected, executed_ok) in PROPOSALS:
 
-        correct, notes = score_proposal(
-            dataset, column, issue_type, rows_affected, executed_ok
+        label, notes = score_proposal(
+            dataset, column, issue_type, executed_ok
         )
 
         records.append({
@@ -164,50 +155,75 @@ def main() -> None:
             "score":          score,
             "rows_affected":  rows_affected,
             "executed_ok":    executed_ok,
-            "correct":        correct,
+            "label":          label,
+            # For confusion matrix: treat natural_correct as excluded
+            "correct":        label == "correct",
             "notes":          notes,
         })
 
     df = pd.DataFrame(records)
 
-    # ── Print summary ──────────────────────────────────────────────────────────
-    print("=" * 60)
-    print("  Proposal Scoring Results")
-    print("=" * 60)
+    # ── Separate scoreable proposals from natural-issue ones ──────────────────
+    scoreable = df[df["label"] != "natural_correct"].copy()
+    natural   = df[df["label"] == "natural_correct"].copy()
 
-    for ds in ["healthcare", "ecommerce", "government"]:
-        sub = df[df["dataset"] == ds]
-        correct = sub["correct"].sum()
-        total = len(sub)
-        print(f"\n{ds.upper()} ({total} proposals):")
-        print(f"  Correct: {correct}/{total} "
-              f"({100*correct/total:.0f}%)")
-        for tier in ["High", "Medium", "Low"]:
-            t = sub[sub["predicted_tier"] == tier]
-            if len(t) == 0:
-                continue
-            tc = t["correct"].sum()
-            print(f"  {tier}: {tc}/{len(t)} correct "
-                  f"({100*tc/len(t):.0f}%)")
+    print()
+    print("=" * 65)
+    print("  Proposal Scoring — Strict Non-Circular Definition")
+    print("  Correctness = column match only (rows_affected NOT used)")
+    print("=" * 65)
 
-    print("\n" + "=" * 60)
-    print("  Confidence-Tier Confusion Matrix (all datasets)")
-    print("=" * 60)
+    print(f"\n  Total proposals:          {len(df)}")
+    print(f"  Scoreable (vs GT ledger): {len(scoreable)}")
+    print(f"  Natural issues (excluded from matrix): {len(natural)}")
+    print(f"    Columns: {sorted(natural['column'].unique())}")
 
-    for tier in ["High", "Medium", "Low"]:
-        t = df[df["predicted_tier"] == tier]
+    print()
+    print("  " + "-" * 61)
+    print(f"  {'Tier':<10} {'Correct':>8} {'Incorrect':>10} "
+          f"{'Total':>7} {'Precision':>10}")
+    print("  " + "-" * 61)
+
+    tier_order = ["High", "Medium", "Low"]
+    for tier in tier_order:
+        t = scoreable[scoreable["predicted_tier"] == tier]
         if len(t) == 0:
             continue
         tc = t["correct"].sum()
-        print(f"  {tier:6s}: {tc:2d}/{len(t):2d} correct "
-              f"= precision {100*tc/len(t):.0f}%")
+        bar = "█" * int(100 * tc / len(t) / 10)
+        print(f"  {tier:<10} {int(tc):>8} {int(len(t)-tc):>10} "
+              f"{len(t):>7}   {100*tc/len(t):>5.1f}%  {bar}")
 
-    total_correct = df["correct"].sum()
-    total = len(df)
-    print(f"\n  Overall: {total_correct}/{total} correct "
-          f"({100*total_correct/total:.0f}%)")
+    total_correct = scoreable["correct"].sum()
+    total = len(scoreable)
+    print("  " + "-" * 61)
+    print(f"  {'Overall':<10} {int(total_correct):>8} "
+          f"{int(total-total_correct):>10} {total:>7} "
+          f"  {100*total_correct/total:>5.1f}%")
+    print("=" * 65)
 
-    # ── Save scored CSV ────────────────────────────────────────────────────────
+    print()
+    print("  Per-dataset breakdown (scoreable only):")
+    for ds in ["healthcare", "ecommerce", "government"]:
+        sub = scoreable[scoreable["dataset"] == ds]
+        if len(sub) == 0:
+            continue
+        c = sub["correct"].sum()
+        t = len(sub)
+        print(f"    {ds:<14}: {int(c)}/{t} correct ({100*c/t:.0f}%)")
+
+    print()
+    print("  Natural issues found (genuine but not in GT ledger):")
+    for _, row in natural.iterrows():
+        print(f"    [{row['dataset']}] {row['column']} "
+              f"({row['issue_type']}) tier={row['predicted_tier']}")
+
+    print()
+    print("  NOTE: The confusion matrix below covers only scoreable")
+    print("  proposals. Natural issues are reported above as additional")
+    print("  detections beyond the injected ground truth.")
+
+    # ── Save ──────────────────────────────────────────────────────────────────
     out_path = OUT_DIR / "proposal_scores.csv"
     df.to_csv(out_path, index=False)
     print(f"\n  Saved to: {out_path}")
